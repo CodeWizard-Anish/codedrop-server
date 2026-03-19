@@ -2,88 +2,90 @@ const express = require("express");
 const multer = require("multer");
 const cors = require("cors");
 const { v4: uuidv4 } = require("uuid");
-const path = require("path");
 const fs = require("fs");
+const path = require("path");
 
 const app = express();
 app.use(cors());
 
-const UPLOAD_DIR = path.join(__dirname, "uploads");
+const uploadsDir = path.join(__dirname, "uploads");
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir);
 
-// ensure folder exists
-if (!fs.existsSync(UPLOAD_DIR)) {
-  fs.mkdirSync(UPLOAD_DIR);
-}
+const files = new Map(); // id -> { path, name, expiresAt, downloads }
 
-// storage config
-const storage = multer.diskStorage({
-  destination: UPLOAD_DIR,
-  filename: (req, file, cb) => {
-    const id = uuidv4();
-    const ext = path.extname(file.originalname);
-    cb(null, id + ext);
-  },
+const upload = multer({
+  dest: "uploads/",
+  limits: {
+    fileSize: 10 * 1024 * 1024 // 10MB
+  }
 });
 
-const upload = multer({ storage });
-
-// store metadata (in-memory for now)
-const files = new Map();
-
-/* ---------------- UPLOAD ---------------- */
+/* -------- UPLOAD -------- */
 
 app.post("/upload", upload.single("file"), (req, res) => {
-  const id = path.parse(req.file.filename).name;
+  const id = uuidv4();
 
-  const expireAt = Date.now() + 10 * 60 * 1000; // 10 min
+  const expiresAt = Date.now() + 10 * 60 * 1000; // 10 min
 
   files.set(id, {
     path: req.file.path,
-    originalName: req.file.originalname,
-    expireAt,
+    name: req.file.originalname,
+    expiresAt,
+    downloads: 0
   });
 
-  const baseUrl = `${req.protocol}://${req.get("host")}`;
+  // auto delete
+  setTimeout(() => {
+    const file = files.get(id);
+    if (file) {
+      fs.unlink(file.path, () => {});
+      files.delete(id);
+    }
+  }, 10 * 60 * 1000);
 
-res.json({
-  url: `${baseUrl}/file/${id}`
-});
+  res.json({
+    url: `https://codedrop-server.onrender.com/file/${id}`,
+    expiresAt
+  });
 });
 
-/* ---------------- DOWNLOAD ---------------- */
+/* -------- DOWNLOAD -------- */
 
 app.get("/file/:id", (req, res) => {
   const file = files.get(req.params.id);
 
   if (!file) return res.status(404).send("Not found");
 
-  if (file.expireAt < Date.now()) {
+  if (Date.now() > file.expiresAt) {
     return res.status(410).send("Expired");
   }
 
-  res.download(file.path, file.originalName);
+  file.downloads++;
+
+  res.download(file.path, file.name);
 });
 
-/* ---------------- CLEANUP ---------------- */
+/* -------- STATS -------- */
 
-// delete expired files every minute
-setInterval(() => {
-  const now = Date.now();
+app.get("/stats/:id", (req, res) => {
+  const file = files.get(req.params.id);
+  if (!file) return res.status(404).json({});
 
-  for (const [id, file] of files.entries()) {
-    if (file.expireAt < now) {
-      try {
-        fs.unlinkSync(file.path);
-      } catch {}
+  res.json({
+    downloads: file.downloads,
+    expiresAt: file.expiresAt
+  });
+});
 
-      files.delete(id);
-    }
+/* -------- ERROR HANDLER -------- */
+
+app.use((err, req, res, next) => {
+  if (err.code === "LIMIT_FILE_SIZE") {
+    return res.status(400).json({
+      error: "File too large (max 10MB)"
+    });
   }
-}, 60 * 1000);
-
-/* ---------------- START ---------------- */
-
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
+  next(err);
 });
+
+app.listen(3000, () => console.log("Server running"));
