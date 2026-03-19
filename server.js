@@ -43,9 +43,11 @@ app.post("/upload", upload.single("file"), (req, res) => {
     expireAt,
   });
 
-  const url = `${req.protocol}://${req.get("host")}/file/${id}`;
+  const baseUrl = `${req.protocol}://${req.get("host")}`;
 
-  res.json({ url });
+res.json({
+  url: `${baseUrl}/file/${id}`
+});
 });
 
 /* ---------------- DOWNLOAD ---------------- */
